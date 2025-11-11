@@ -1,0 +1,1307 @@
+// ✅ CORRECTION : server.js
+require('dotenv').config();
+const express = require('express');
+const connectDB = require('./src/config/database');
+const securityMiddleware = require('./src/middleware/security');
+
+// Routes
+const authRoutes = require('./src/routes/authRoutes');
+const paymentRoutes = require('./src/routes/paymentRoutes');
+const webhookRoutes = require('./src/routes/webhookRoutes');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Connexion base de données
+connectDB();
+app.set('trust proxy', 1);
+
+// Middleware de sécurité
+app.use(securityMiddleware.helmet());
+app.use(securityMiddleware.corsMiddleware);
+app.use(securityMiddleware.limiter);
+
+// ✅ CORRECTION : Raw body pour le webhook (AVANT le JSON global)
+app.use(
+  '/api/v1/webhooks/mesomb',
+  express.raw({
+    // accepter application/json même avec charset (ex: application/json; charset=utf-8)
+    type: (req) => {
+      const ct = (req.headers['content-type'] || '').toLowerCase();
+      return ct.includes('application/json') || ct.includes('+json');
+    },
+    limit: '10mb',
+    // conserver le buffer brut pour la vérification de signature
+    verify: (req, res, buf /*, encoding */) => {
+      req.rawBody = buf;
+    }
+  })
+);
+
+// Middleware pour parser le JSON (pour les autres routes)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// ✅ AJOUT : Logger des requêtes avec plus de détails
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.path}`);
+  
+  // Logger les headers importants (sauf pour /health)
+  if (req.path !== '/health') {
+    console.log('  Headers:', {
+      'content-type': req.headers['content-type'],
+      'x-api-key': req.headers['x-api-key'] ? '***' : undefined,
+      'authorization': req.headers['authorization'] ? 'Bearer ***' : undefined
+    });
+  }
+  
+  next();
+});
+
+// Routes
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/payments', paymentRoutes);
+app.use('/api/v1/webhooks', webhookRoutes);
+
+// Route santé
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'API Payment SaaS MeSomb en fonctionnement',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0',
+    environment: process.env.NODE_ENV,
+    mongodb: 'Connecté',
+    mesomb: {
+      configured: !!(process.env.MESOMB_APP_KEY && process.env.MESOMB_API_KEY && process.env.MESOMB_SECRET_KEY),
+      app_key: process.env.MESOMB_APP_KEY ? '✅ Configuré' : '❌ Manquant',
+      api_key: process.env.MESOMB_API_KEY ? '✅ Configuré' : '❌ Manquant',
+      secret_key: process.env.MESOMB_SECRET_KEY ? '✅ Configuré' : '❌ Manquant'
+    }
+  });
+});
+
+// ✅ AJOUT : Route de test pour vérifier le raw body
+app.post('/test-webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  console.log('📦 Test webhook:');
+  console.log('  - Buffer:', req.body);
+  console.log('  - String:', req.body.toString());
+  console.log('  - Headers:', req.headers);
+  res.json({ success: true, message: 'Test OK' });
+});
+
+// Middleware global d'erreurs
+app.use((err, req, res, next) => {
+  console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.error('❌ Erreur non gérée:', err.message);
+  console.error('Stack:', err.stack);
+  console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  
+  const statusCode = err.statusCode || 500;
+  const message = process.env.NODE_ENV === 'development' ? err.message : 'Erreur serveur interne';
+  
+  res.status(statusCode).json({
+    success: false,
+    message,
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+});
+
+// Démarrage du serveur
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🚀 Serveur MeSomb Payment API démarré');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`📡 Port: ${PORT}`);
+  console.log(`🌍 Environnement: ${process.env.NODE_ENV}`);
+  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  console.log(`📚 Endpoints:`);
+  console.log(`   - POST /api/v1/auth/register`);
+  console.log(`   - POST /api/v1/auth/login`);
+  console.log(`   - POST /api/v1/payments/initiate`);
+  console.log(`   - GET  /api/v1/payments/status/:reference`);
+  console.log(`   - POST /api/v1/webhooks/mesomb`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  
+  // ✅ Vérification des variables d'environnement au démarrage
+  const missingVars = [];
+  if (!process.env.MONGODB_URI) missingVars.push('MONGODB_URI');
+  if (!process.env.JWT_SECRET) missingVars.push('JWT_SECRET');
+  if (!process.env.MESOMB_APP_KEY) missingVars.push('MESOMB_APP_KEY');
+  if (!process.env.MESOMB_API_KEY) missingVars.push('MESOMB_API_KEY');
+  if (!process.env.MESOMB_SECRET_KEY) missingVars.push('MESOMB_SECRET_KEY');
+  
+  if (missingVars.length > 0) {
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.error('⚠️  ATTENTION : Variables manquantes dans .env:');
+    missingVars.forEach(v => console.error(`   - ${v}`));
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  } else {
+    console.log('✅ Toutes les variables d\'environnement sont configurées');
+  }
+});
+
+module.exports = app;
+{
+  "name": "payment-saas",
+  "version": "1.0.0",
+  "description": "API de paiement SaaS avec MeSomb",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@hachther/mesomb": "^2.0.1",
+    "axios": "^1.13.2",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^6.11.2",
+    "express-validator": "^7.3.0",
+    "helmet": "^7.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.8.7",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
+
+# MeSomb Configuration
+MESOMB_API_KEY=4857b474-8fd3-4e52-846b-2141df99b1c8
+MESOMB_SECRET_KEY=dc585a67-216c-497d-8be4-5adb033b390a
+MESOMB_BASE_URL=https://mesomb.hachther.com/api/v1.1
+MESOMB_APP_KEY=090c80d9ba44bc0e28d02e1fcae3dbce4f26e94c
+# Application
+PORT=3000
+JWT_SECRET=votre_secret_jwt_super_securise
+NODE_ENV=development
+
+# Database
+MONGODB_URI=mongodb+srv://ahmed:ahmedo90210@cluster0.rjxboax.mongodb.net/
+
+// src/services/notificationService.js
+const axios = require('axios');
+const crypto = require('crypto');
+
+class NotificationService {
+  // Envoi de SMS (simulation en dev)
+  async sendPaymentConfirmation(phone, amount, reference) {
+    console.log(`📱 [SMS SIMULÉ] Envoyé à ${phone}: "Veuillez confirmer le paiement de ${amount} FCFA. Réf: ${reference}"`);
+    return { success: true };
+  }
+
+  async sendPaymentSuccess(phone, amount, reference) {
+    console.log(`✅ [SMS SIMULÉ] Succès à ${phone}: "Paiement de ${amount} FCFA confirmé. Réf: ${reference}"`);
+    return { success: true };
+  }
+
+  async sendPaymentFailure(phone, amount, reference, reason = 'Échec du paiement') {
+    console.log(`❌ [SMS SIMULÉ] Échec à ${phone}: "Paiement de ${amount} FCFA échoué. Raison: ${reason}. Réf: ${reference}"`);
+    return { success: true };
+  }
+
+  // 🔑 ENVOI WEBHOOK AU MARCHAND (essentiel)
+  async notifyMerchant(webhookUrl, payload) {
+    if (!webhookUrl) {
+      console.warn('⚠️ Webhook URL absente → notification ignorée');
+      return { success: false, error: 'Webhook URL manquante' };
+    }
+
+    // utiliser une clé interne pour signer les notifications vers les marchands
+    const secret = process.env.INTERNAL_WEBHOOK_SECRET || process.env.MESOMB_SECRET_KEY;
+    const body = JSON.stringify(payload);
+    const signature = crypto.createHmac('sha256', secret).update(body).digest('hex');
+
+    try {
+      console.log(`📡 Envoi webhook à: ${webhookUrl}`);
+      console.log('📦 Payload:', JSON.stringify(payload, null, 2));
+
+      const response = await axios.post(webhookUrl, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-merchant-signature': signature,
+          // optional: include app-specific api key if merchant expects it
+          'x-api-key': process.env.INTERNAL_API_KEY || ''
+        },
+        timeout: 5000
+      });
+
+      console.log(`✅ Webhook reçu par le marchand (status: ${response.status})`);
+      return { success: true, status: response.status };
+    } catch (error) {
+      console.error(`❌ Échec webhook → ${error.message}`);
+      // retourner l'erreur pour que l'appelant puisse agir
+      return { success: false, error: error.message };
+    }
+  }
+}
+
+module.exports = new NotificationService();
+// ✅ CORRECTION : src/services/mesombOfficialService.js
+const { PaymentOperation } = require('@hachther/mesomb');
+
+class MeSombOfficialService {
+  constructor() {
+    this.applicationKey = process.env.MESOMB_APP_KEY;
+    this.accessKey = process.env.MESOMB_API_KEY;
+    this.secretKey = process.env.MESOMB_SECRET_KEY;
+
+    // ✅ AJOUT : Vérification des clés au démarrage
+    if (!this.applicationKey || !this.accessKey || !this.secretKey) {
+      console.error('❌ ERREUR : Clés MeSomb manquantes dans .env');
+      console.error('  - MESOMB_APP_KEY:', this.applicationKey ? '✅' : '❌ MANQUANT');
+      console.error('  - MESOMB_API_KEY:', this.accessKey ? '✅' : '❌ MANQUANT');
+      console.error('  - MESOMB_SECRET_KEY:', this.secretKey ? '✅' : '❌ MANQUANT');
+    } else {
+      console.log('✅ MeSomb Service initialisé avec succès');
+      console.log('  - APP_KEY:', this.applicationKey.substring(0, 10) + '...');
+      console.log('  - API_KEY:', this.accessKey.substring(0, 10) + '...');
+      console.log('  - SECRET_KEY:', this.secretKey.substring(0, 10) + '...');
+    }
+  }
+
+  async makePayment(amount, phone, operator) {
+    try {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🚀 Appel à MeSomb (SDK officiel @hachther/mesomb)...');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('📞 Numéro:', phone);
+      console.log('💰 Montant:', amount, 'XAF');
+      console.log('📱 Opérateur reçu:', operator);
+
+      // ✅ CORRECTION : Validation des paramètres
+      if (!amount || amount < 10000) {
+        return {
+          success: false,
+          error: 'Montant invalide (minimum 10000 XAF)'
+        };
+      }
+
+      if (!phone || !/^237[0-9]{9}$/.test(phone)) {
+        return {
+          success: false,
+          error: 'Numéro de téléphone invalide (format attendu: 237XXXXXXXXX)'
+        };
+      }
+
+      // ✅ Création du client MeSomb
+      const client = new PaymentOperation({
+        applicationKey: this.applicationKey,
+        accessKey: this.accessKey,
+        secretKey: this.secretKey
+      });
+
+      // ✅ Le SDK MeSomb attend 'MTN' ou 'ORANGE'
+      const service = operator === 'ORANGE' ? 'ORANGE' : 'MTN';
+      console.log('🔧 Service mappé pour SDK MeSomb:', service);
+
+      // ✅ Paramètres du paiement
+      const paymentParams = {
+        payer: phone,
+        amount: amount,
+        service: service,
+        country: 'CM',
+        currency: 'XAF'
+      };
+
+      console.log('📤 Paramètres envoyés à MeSomb:', JSON.stringify(paymentParams, null, 2));
+
+      // ✅ Appel API MeSomb
+      const response = await client.makeCollect(paymentParams);
+
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('📥 Réponse MeSomb (brute):', JSON.stringify(response, null, 2));
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      // ✅ Analyse de la réponse
+      console.log('🔍 Analyse de la réponse:');
+      console.log('  - isOperationSuccess():', response.isOperationSuccess ? response.isOperationSuccess() : 'N/A');
+      console.log('  - isTransactionSuccess():', response.isTransactionSuccess ? response.isTransactionSuccess() : 'N/A');
+      console.log('  - Transaction ID (pk):', response.transaction?.pk || 'N/A');
+      console.log('  - Status:', response.transaction?.status || 'N/A');
+
+      // ✅ IMPORTANT : Le statut final viendra du WEBHOOK
+      // On retourne seulement si l'initiation a réussi
+      if (response.isOperationSuccess && response.isOperationSuccess()) {
+        if (response.isTransactionSuccess && response.isTransactionSuccess()) {
+          console.log('✅ Paiement initié avec succès');
+          console.log('⏳ Attente de la confirmation client et du webhook MeSomb...');
+
+          return {
+            success: true,
+            data: {
+              transactionId: response.transaction?.pk,
+              message: 'Paiement initié avec succès',
+              // ⚠️ Ne PAS renvoyer le statut ici, il viendra du webhook
+            }
+          };
+        } else {
+          console.log('❌ Transaction échouée (isTransactionSuccess = false)');
+          return {
+            success: false,
+            error: 'Échec de l\'initiation du paiement (transaction failed)'
+          };
+        }
+      } else {
+        console.log('❌ Opération échouée (isOperationSuccess = false)');
+        return {
+          success: false,
+          error: 'Échec de l\'initiation du paiement (operation failed)'
+        };
+      }
+
+    } catch (error) {
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error('❌ Erreur MeSomb (SDK officiel):', error.message);
+      console.error('Stack:', error.stack);
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      // ✅ Détails de l'erreur pour debug
+      if (error.response) {
+        console.error('📥 Réponse d\'erreur:', error.response.data);
+      }
+
+      return {
+        success: false,
+        error: error.message || 'Erreur lors de l\'appel à MeSomb'
+      };
+    }
+  }
+
+  // ✅ Méthode pour vérifier le statut (ne devrait PAS être utilisée - préférer le webhook)
+  async checkTransactionStatus(transactionId) {
+    try {
+      console.log('🔍 Vérification statut MeSomb pour:', transactionId);
+      console.log('⚠️ ATTENTION : Cette méthode ne devrait être utilisée qu\'en dernier recours');
+      console.log('   Le statut DOIT venir du webhook pour être fiable');
+
+      const client = new PaymentOperation({
+        applicationKey: this.applicationKey,
+        accessKey: this.accessKey,
+        secretKey: this.secretKey
+      });
+
+      const transactions = await client.getTransactions([transactionId]);
+
+      if (transactions && transactions.length > 0) {
+        console.log('✅ Transaction trouvée:', JSON.stringify(transactions[0], null, 2));
+        return {
+          success: true,
+          data: transactions[0]
+        };
+      } else {
+        console.log('❌ Transaction non trouvée sur MeSomb');
+        return {
+          success: false,
+          error: 'Transaction non trouvée'
+        };
+      }
+    } catch (error) {
+      console.error('❌ Erreur vérification statut MeSomb:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+}
+
+module.exports = new MeSombOfficialService();
+const express = require('express');
+const router = express.Router();
+const webhookController = require('../controllers/webhookController');
+
+// Webhook MeSomb
+router.post('/mesomb', webhookController.handleMeSombWebhook);
+
+module.exports = router;
+const express = require('express');
+const router = express.Router();
+const paymentController = require('../controllers/paymentController');
+const { validateInitiatePayment, handleValidationErrors } = require('../middleware/validation');
+
+// ✅ Validation + traitement
+router.post('/initiate', validateInitiatePayment, handleValidationErrors, paymentController.initiatePayment);
+
+router.get('/status/:reference', paymentController.checkPaymentStatus);
+router.get('/merchant/:merchant_id', paymentController.getMerchantTransactions);
+
+module.exports = router;
+const express = require('express');
+const router = express.Router();
+const paymentController = require('../controllers/paymentController');
+const { validateInitiatePayment, handleValidationErrors } = require('../middleware/validation');
+
+// ✅ Validation + traitement
+router.post('/initiate', validateInitiatePayment, handleValidationErrors, paymentController.initiatePayment);
+
+router.get('/status/:reference', paymentController.checkPaymentStatus);
+router.get('/merchant/:merchant_id', paymentController.getMerchantTransactions);
+
+module.exports = router;
+const mongoose = require('mongoose');
+
+const transactionSchema = new mongoose.Schema({
+  reference: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  currency: {
+    type: String,
+    default: 'XAF'
+  },
+  customer_phone: {
+    type: String,
+    required: true
+  },
+  operator: {
+    type: String,
+    enum: ['ORANGE', 'MTN'],
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['PENDING', 'SUCCESS', 'FAILED', 'EXPIRED', 'REFUNDED'],
+    default: 'PENDING'
+  },
+  mesomb_transaction_id: {
+    type: String
+  },
+  merchant_id: {
+    type: String,
+    required: true
+  },
+  metadata: {
+    type: Object,
+    default: {}
+  }
+}, {
+  timestamps: true
+});
+
+// Index pour les recherches rapides
+transactionSchema.index({ reference: 1 });
+transactionSchema.index({ customer_phone: 1 });
+transactionSchema.index({ status: 1 });
+transactionSchema.index({ createdAt: 1 });
+
+module.exports = mongoose.model('Transaction', transactionSchema);
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const merchantSchema = new mongoose.Schema({
+  company_name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6
+  },
+  phone: {
+    type: String,
+    required: true
+  },
+  webhook_url: {
+    type: String
+  },
+  is_active: {
+    type: Boolean,
+    default: true
+  },
+  api_key: {
+    type: String,
+    unique: true
+  }
+}, {
+  timestamps: true
+});
+
+// Hash password avant sauvegarde
+merchantSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  this.password = await bcrypt.hash(this.password, 12);
+  next();
+});
+
+// Générer API Key
+merchantSchema.methods.generateApiKey = function() {
+  this.api_key = require('crypto').randomBytes(32).toString('hex');
+};
+
+module.exports = mongoose.model('Merchant', merchantSchema);
+// ✅ CORRECTION : src/middleware/validation.js
+const { body, validationResult } = require('express-validator');
+
+// ✅ CORRECTION : Validation pour /payments/initiate
+const validateInitiatePayment = [
+  // Montant : entier ≥ 10000 FCFA (minimum MeSomb)
+  body('amount')
+    .isInt({ min: 10000 })
+    .withMessage('Le montant doit être un entier d\'au moins 10000 FCFA'),
+
+  // ✅ CORRECTION : Numéro de téléphone camerounais avec ou sans +
+  body('customer_phone')
+    .matches(/^\+?237[0-9]{9}$/)
+    .withMessage('Le numéro doit être un numéro camerounais valide (format: 237XXXXXXXXX ou +237XXXXXXXXX)')
+    .customSanitizer(value => {
+      // Normaliser : enlever le + si présent => on garde toujours "237XXXXXXXXX"
+      return String(value || '').replace(/^\+/, '');
+    }),
+
+  // Opérateur : uniquement ORANGE ou MTN
+  body('operator')
+    .isIn(['ORANGE', 'MTN'])
+    .withMessage('Opérateur doit être ORANGE ou MTN'),
+
+  // merchant_id : doit être une chaîne non vide
+  body('merchant_id')
+    .isString()
+    .notEmpty()
+    .withMessage('merchant_id est requis')
+];
+
+// ✅ CORRECTION : Validation pour l'inscription marchand
+const validateRegister = [
+  body('company_name')
+    .notEmpty()
+    .withMessage('Nom de l\'entreprise requis')
+    .trim(),
+
+  body('email')
+    .isEmail()
+    .withMessage('Email invalide')
+    .normalizeEmail(),
+
+  body('password')
+    .isLength({ min: 6 })
+    .withMessage('Mot de passe ≥ 6 caractères'),
+
+  // ✅ CORRECTION : Téléphone marchand avec format flexible
+  body('phone')
+    .matches(/^\+?237[0-9]{9}$/)
+    .withMessage('Téléphone marchand : numéro camerounais valide requis (format: 237XXXXXXXXX ou +237XXXXXXXXX)')
+    .customSanitizer(value => {
+      // Normaliser : enlever le + si présent
+      return String(value || '').replace(/^\+/, '');
+    }),
+
+  // Webhook URL optionnel mais doit être valide si fourni
+  body('webhook_url')
+    .optional()
+    .isURL()
+    .withMessage('URL du webhook invalide')
+];
+
+// Middleware central pour retourner les erreurs de validation
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    console.log('❌ Erreurs de validation:', errors.array());
+    return res.status(400).json({
+      success: false,
+      message: 'Données invalides',
+      errors: errors.array({ onlyFirstError: true }) // Une seule erreur par champ
+    });
+  }
+  next();
+};
+
+module.exports = {
+  validateInitiatePayment,
+  validateRegister,
+  handleValidationErrors
+};
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const cors = require('cors');
+
+// Configuration CORS
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  optionsSuccessStatus: 200
+};
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limite chaque IP à 100 requêtes par windowMs
+});
+
+// Middleware CORS configuré
+const corsMiddleware = cors(corsOptions);
+
+module.exports = {
+  corsMiddleware, 
+  limiter,
+  helmet
+};
+// src/middleware/errorHandler.js
+const errorHandler = (err, req, res, next) => {
+  // Log détaillé en mode développement
+  if (process.env.NODE_ENV === 'development') {
+    console.error('❌ Erreur non gérée:', {
+      message: err.message,
+      stack: err.stack,
+      url: req.originalUrl,
+      method: req.method
+    });
+  }
+
+  // Définir le code de statut (par défaut 500)
+  const statusCode = err.statusCode || 500;
+
+  res.status(statusCode).json({
+    success: false,
+    message: err.message || 'Erreur serveur interne',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+};
+
+module.exports = errorHandler;
+const jwt = require('jsonwebtoken');
+const Merchant = require('../models/Merchant');
+
+// Vérifier le token JWT
+const authenticateToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Token d\'accès manquant'
+      });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    req.merchantId = decoded.merchantId;
+    next();
+  } catch (error) {
+    return res.status(403).json({
+      success: false,
+      message: 'Token invalide'
+    });
+  }
+};
+
+// Vérifier la clé API
+const authenticateApiKey = async (req, res, next) => {
+  try {
+    const apiKey = req.headers['x-api-key'];
+
+    if (!apiKey) {
+      return res.status(401).json({
+        success: false,
+        message: 'Clé API manquante'
+      });
+    }
+
+    const merchant = await Merchant.findOne({ api_key: apiKey });
+    if (!merchant) {
+      return res.status(403).json({
+        success: false,
+        message: 'Clé API invalide'
+      });
+    }
+
+    req.merchant = merchant;
+    next();
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur d\'authentification'
+    });
+  }
+};
+
+module.exports = {
+  authenticateToken,
+  authenticateApiKey
+};
+// ✅ CORRECTION COMPLÈTE : src/controllers/webhookController.js
+const crypto = require('crypto');
+const Transaction = require('../models/Transaction');
+const Merchant = require('../models/Merchant');
+const NotificationService = require('../services/notificationService');
+
+class WebhookController {
+  // Accept both sha1 and sha256, hex or base64, remove prefices like "sha1=" or "sha256="
+  verifySignature(payloadBuffer, signatureHeader, secret) {
+    if (!payloadBuffer || !signatureHeader || !secret) return false;
+
+    let sig = String(signatureHeader).trim();
+    sig = sig.replace(/^(sha1=|sha256=|sha1:|sha256:)/i, '');
+
+    const tryDecode = (alg, encoding) => {
+      try {
+        const computed = crypto.createHmac(alg, secret).update(payloadBuffer).digest();
+        const sigBuf = Buffer.from(sig, encoding);
+        if (sigBuf.length !== computed.length) return false;
+        return crypto.timingSafeEqual(computed, sigBuf);
+      } catch (e) {
+        return false;
+      }
+    };
+
+    // try hex/base64 with sha1 then sha256
+    return tryDecode('sha1', 'hex') || tryDecode('sha1', 'base64') ||
+           tryDecode('sha256', 'hex') || tryDecode('sha256', 'base64');
+  }
+
+  // nouvelle méthode pour vérifier signature interne marchand
+  verifyInternalSignature(payloadBuffer, signatureHeader) {
+    const secret = process.env.INTERNAL_WEBHOOK_SECRET || process.env.MESOMB_SECRET_KEY;
+    if (!signatureHeader || !secret) return false;
+    const sig = String(signatureHeader).trim();
+    const computed = crypto.createHmac('sha256', secret).update(payloadBuffer).digest('hex');
+    return crypto.timingSafeEqual(Buffer.from(computed, 'hex'), Buffer.from(sig, 'hex'));
+  }
+
+  async handleMeSombWebhook(req, res) {
+    try {
+      // prefer raw buffer
+      const payloadBuffer = req.rawBody || (Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {})));
+
+      // If request came from internal notifier, verify internal signature and ignore processing to avoid loops
+      const internalSig = req.headers['x-internal-signature'];
+      if (internalSig) {
+        if (this.verifyInternalSignature(payloadBuffer, internalSig)) {
+          console.log('⚠️ Requête interne reçue — ignorée pour éviter boucle');
+          return res.status(200).json({ success: true, message: 'Internal notification ignored' });
+        } else {
+          console.warn('Requête interne avec signature invalide — rejetée');
+          return res.status(401).json({ success: false, message: 'Internal signature invalid' });
+        }
+      }
+
+      const signature =
+        req.headers['x-signature'] ||
+        req.headers['x-mesomb-signature'] ||
+        req.headers['signature'] ||
+        req.headers['x-hub-signature'];
+
+      const secret = process.env.MESOMB_SECRET_KEY;
+
+      // prefer rawBody set by express.raw middleware
+      // const payloadBuffer = req.rawBody || (Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {})));
+
+      // En production : exiger signature
+      if (!signature || !secret) {
+        console.warn('Webhook sans signature ou secret manquant', { signaturePresent: !!signature });
+        return res.status(400).json({ success: false, message: 'Signature manquante' });
+      }
+
+      if (!this.verifySignature(payloadBuffer, signature, secret)) {
+        console.warn('Signature invalide — rejet du webhook');
+        return res.status(401).json({ success: false, message: 'Signature invalide' });
+      }
+
+      console.log('✅ Signature vérifiée');
+
+      const payload = JSON.parse(payloadBuffer.toString());
+
+      console.log('📦 Payload webhook:', JSON.stringify(payload, null, 2));
+
+      const { pk, status, reference, amount, customer } = payload;
+
+      if (!status || !reference) {
+        console.log('❌ Données manquantes dans le webhook');
+        return res.status(400).json({ success: false, message: 'Données manquantes' });
+      }
+
+      console.log('🔍 Recherche transaction:', { reference, pk });
+
+      // Trouver la transaction dans la base de données
+      const transaction = await Transaction.findOne({
+        $or: [{ reference }, { mesomb_transaction_id: pk }]
+      });
+
+      if (!transaction) {
+        console.log('❌ Transaction introuvable pour:', { reference, pk });
+        return res.status(404).json({ success: false, message: 'Transaction introuvable' });
+      }
+
+      console.log('✅ Transaction trouvée:', transaction.reference);
+
+      // Mapping des statuts MeSomb
+      const statusMap = {
+        SUCCESS: 'SUCCESS',
+        FAILED: 'FAILED',
+        PENDING: 'PENDING',
+        REFUNDED: 'REFUNDED',
+        EXPIRED: 'EXPIRED'
+      };
+      const newStatus = statusMap[status] || 'PENDING';
+
+      console.log('🔄 Changement de statut:', transaction.status, '→', newStatus);
+
+      // Mettre à jour la transaction si le statut a changé
+      if (transaction.status !== newStatus) {
+        await Transaction.findByIdAndUpdate(transaction._id, {
+          status: newStatus,
+          mesomb_transaction_id: pk || transaction.mesomb_transaction_id
+        });
+        console.log(`✅ Statut mis à jour: ${transaction.reference} → ${newStatus}`);
+      } else {
+        console.log('ℹ️ Statut inchangé, aucune mise à jour nécessaire');
+      }
+
+      // Notification du client
+      if (newStatus === 'SUCCESS') {
+        await NotificationService.sendPaymentSuccess(
+          transaction.customer_phone,
+          transaction.amount,
+          transaction.reference
+        );
+      } else if (newStatus === 'FAILED') {
+        await NotificationService.sendPaymentFailure(
+          transaction.customer_phone,
+          transaction.amount,
+          transaction.reference
+        );
+      }
+
+      // Notification du marchand via son webhook
+      if (transaction.merchant_id) {
+        const merchant = await Merchant.findById(transaction.merchant_id);
+        if (merchant?.webhook_url) {
+          console.log('📡 Envoi webhook au marchand:', merchant.webhook_url);
+          const webhookPayload = {
+            event: 'payment.updated',
+            data: {
+              reference: transaction.reference,
+              amount: transaction.amount,
+              currency: transaction.currency || 'XAF',
+              customer_phone: transaction.customer_phone,
+              status: newStatus,
+              operator: transaction.operator,
+              mesomb_transaction_id: pk,
+              timestamp: new Date().toISOString()
+            }
+          };
+          try {
+            await NotificationService.notifyMerchant(merchant.webhook_url, webhookPayload);
+            console.log('✅ Marchand notifié avec succès');
+          } catch (err) {
+            console.error('❌ Erreur lors de la notification du marchand:', err);
+          }
+        } else {
+          console.log('ℹ️ Pas de webhook_url configuré pour le marchand');
+        }
+      }
+
+      return res.status(200).json({ success: true, message: 'Webhook traité avec succès' });
+    } catch (err) {
+      console.error('❌ Erreur webhook:', err);
+      return res.status(500).json({ success: false, message: 'Erreur serveur', error: err.message });
+    }
+  }
+}
+
+// ✅ Binding obligatoire pour préserver `this`
+const instance = new WebhookController();
+module.exports = {
+  handleMeSombWebhook: instance.handleMeSombWebhook.bind(instance)
+};
+// src/controllers/paymentController.js
+const Transaction = require('../models/Transaction');
+const MeSombService = require('../services/mesombOfficialService');
+const NotificationService = require('../services/notificationService');
+const { v4: uuidv4 } = require('uuid');
+
+class PaymentController {
+  async initiatePayment(req, res) {
+    try {
+      const { amount, customer_phone, operator, merchant_id, metadata } = req.body;
+
+      // ✅ Validation déjà gérée par middleware (express-validator)
+
+      const reference = `TX-${uuidv4().substring(0, 8).toUpperCase()}`;
+      const transaction = new Transaction({
+        reference,
+        amount,
+        customer_phone,
+        operator,
+        merchant_id,
+        metadata: metadata || {},
+        status: 'PENDING' // 🔑 Toujours PENDING au début
+      });
+      await transaction.save();
+
+      console.log(`💰 Paiement initié: ${reference}`);
+      await NotificationService.sendPaymentConfirmation(customer_phone, amount, reference);
+
+      // Appel MeSomb pour initier le paiement
+      const paymentResult = await MeSombService.makePayment(amount, customer_phone, operator);
+
+      if (!paymentResult.success) {
+        // Échec d'initiation (ex: clés invalides, service non activé)
+        await Transaction.findByIdAndUpdate(transaction._id, {
+          status: 'FAILED',
+          metadata: { ...metadata, error: paymentResult.error }
+        });
+        await NotificationService.sendPaymentFailure(customer_phone, amount, reference, paymentResult.error);
+        return res.status(400).json({ success: false, message: 'Échec MeSomb', error: paymentResult.error });
+      }
+
+      // ✅ On sauvegarde l'ID MeSomb, mais PAS le statut
+      await Transaction.findByIdAndUpdate(transaction._id, {
+        mesomb_transaction_id: paymentResult.data.transactionId
+      });
+
+      res.status(200).json({
+        success: true,
+        message: 'Paiement initié – confirmez sur votre téléphone',
+        data: {
+          reference,
+          transaction_id: paymentResult.data.transactionId,
+          status: 'PENDING'
+        }
+      });
+    } catch (error) {
+      console.error('❌ Erreur paiement:', error);
+      res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+  }
+
+  // 🔒 Lecture seule du statut (ne PAS appeler MeSomb ici)
+  async checkPaymentStatus(req, res) {
+    try {
+      const { reference } = req.params;
+      const transaction = await Transaction.findOne({ reference });
+      if (!transaction) {
+        return res.status(404).json({ success: false, message: 'Transaction introuvable' });
+      }
+
+      // 🚫 SUPPRESSION du polling vers MeSomb
+      // Le statut est mis à jour UNIQUEMENT par le webhook
+
+      res.status(200).json({
+        success: true,
+        data: {
+          reference: transaction.reference,
+          amount: transaction.amount,
+          status: transaction.status, // ← État stocké en base (venant du webhook)
+          operator: transaction.operator,
+          created_at: transaction.createdAt
+        }
+      });
+    } catch (error) {
+      console.error('❌ Erreur statut:', error);
+      res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+  }
+
+  async getMerchantTransactions(req, res) {
+    try {
+      const { merchant_id } = req.params;
+      const transactions = await Transaction.find({ merchant_id })
+        .sort({ createdAt: -1 })
+        .limit(20);
+      res.json({ success: true, data: { transactions } });
+    } catch (error) {
+      console.error('❌ Erreur historique marchand:', error);
+      res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+  }
+}
+
+module.exports = new PaymentController();
+const Merchant = require('../models/Merchant');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+class AuthController {
+  // Inscription d'un marchand
+  async register(req, res) {
+    try {
+      const { company_name, email, password, phone, webhook_url } = req.body;
+
+      //  VALIDATION DES CHAMPS OBLIGATOIRES
+      if (!company_name || !email || !password || !phone) {
+        return res.status(400).json({
+          success: false,
+          message: 'Champs manquants: company_name, email, password, phone requis'
+        });
+      }
+
+      // Validation du format email
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Format d\'email invalide'
+        });
+      }
+
+      // Validation de la longueur du mot de passe
+      if (password.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'Le mot de passe doit contenir au moins 6 caractères'
+        });
+      }
+
+      // Validation du format du téléphone (basique)
+      const phoneRegex = /^[0-9+-\s()]{8,20}$/;
+      if (!phoneRegex.test(phone)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Format de téléphone invalide'
+        });
+      }
+
+      // Vérifier si le marchand existe déjà par email ou nom d'entreprise
+      const existingMerchant = await Merchant.findOne({ 
+        $or: [
+          { email: email.toLowerCase().trim() },
+          { company_name: company_name.trim() }
+        ]
+      });
+
+      if (existingMerchant) {
+        const message = existingMerchant.email === email.toLowerCase() 
+          ? 'Un marchand avec cet email existe déjà' 
+          : 'Un marchand avec ce nom d\'entreprise existe déjà';
+        
+        return res.status(400).json({
+          success: false,
+          message
+        });
+      }
+
+      // Créer le marchand avec données nettoyées
+      const merchant = new Merchant({
+        company_name: company_name.trim(),
+        email: email.toLowerCase().trim(),
+        password: password,
+        phone: phone.trim(),
+        webhook_url: webhook_url ? webhook_url.trim() : ''
+      });
+
+      // Générer une clé API sécurisée
+      merchant.api_key = `pk_${crypto.randomBytes(24).toString('hex')}`;
+
+      await merchant.save();
+
+      // Ne pas renvoyer le mot de passe dans la réponse
+      const merchantResponse = {
+        id: merchant._id,
+        company_name: merchant.company_name,
+        email: merchant.email,
+        phone: merchant.phone,
+        webhook_url: merchant.webhook_url,
+        api_key: merchant.api_key,
+        is_active: merchant.is_active,
+        created_at: merchant.createdAt
+      };
+
+      res.status(201).json({
+        success: true,
+        message: 'Marchand inscrit avec succès',
+        data: {
+          merchant: merchantResponse
+        }
+      });
+
+    } catch (error) {
+      console.error('Erreur inscription:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur interne du serveur',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+
+  // Connexion d'un marchand
+  async login(req, res) {
+    try {
+      const { email, password } = req.body;
+
+      // Validation des champs requis
+      if (!email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email et mot de passe requis'
+        });
+      }
+
+      // Vérifier si le marchand existe
+      const merchant = await Merchant.findOne({ 
+        email: email.toLowerCase().trim() 
+      });
+
+      if (!merchant) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email ou mot de passe incorrect'
+        });
+      }
+
+      // Vérifier si le compte est actif
+      if (!merchant.is_active) {
+        return res.status(403).json({
+          success: false,
+          message: 'Compte désactivé. Contactez l\'administrateur.'
+        });
+      }
+
+      // Vérifier le mot de passe
+      const isPasswordValid = await bcrypt.compare(password, merchant.password);
+      if (!isPasswordValid) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email ou mot de passe incorrect'
+        });
+      }
+
+      // Générer un token JWT sécurisé
+      const token = jwt.sign(
+        { 
+          merchantId: merchant._id,
+          email: merchant.email
+        },
+        process.env.JWT_SECRET || 'votre_super_secret_jwt_tres_securise_ici',
+        { expiresIn: '24h' }
+      );
+
+      // Données du marchand à renvoyer (sans informations sensibles)
+      const merchantResponse = {
+        id: merchant._id,
+        company_name: merchant.company_name,
+        email: merchant.email,
+        phone: merchant.phone,
+        webhook_url: merchant.webhook_url,
+        api_key: merchant.api_key,
+        is_active: merchant.is_active
+      };
+
+      res.status(200).json({
+        success: true,
+        message: 'Connexion réussie',
+        data: {
+          merchant: merchantResponse,
+          token,
+          expires_in: '24h'
+        }
+      });
+
+    } catch (error) {
+      console.error('Erreur connexion:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur interne du serveur',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+
+  // NOUVELLE MÉTHODE : Récupérer le profil (optionnelle mais utile)
+  async getProfile(req, res) {
+    try {
+      const merchant = await Merchant.findById(req.merchantId).select('-password');
+      
+      if (!merchant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Marchand non trouvé'
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          merchant
+        }
+      });
+
+    } catch (error) {
+      console.error('Erreur récupération profil:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur interne du serveur',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+
+  // NOUVELLE MÉTHODE : Régénérer la clé API (optionnelle mais utile)
+  async regenerateApiKey(req, res) {
+    try {
+      const merchant = await Merchant.findById(req.merchantId);
+      
+      if (!merchant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Marchand non trouvé'
+        });
+      }
+
+      // Générer une nouvelle clé API
+      const newApiKey = `pk_${crypto.randomBytes(24).toString('hex')}`;
+      merchant.api_key = newApiKey;
+      
+      await merchant.save();
+
+      res.status(200).json({
+        success: true,
+        message: 'Clé API régénérée avec succès',
+        data: {
+          new_api_key: newApiKey
+        }
+      });
+
+    } catch (error) {
+      console.error(' Erreur régénération clé API:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur interne du serveur',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+}
+
+module.exports = new AuthController();
+module.exports = {
+  apiKey: process.env.MESOMB_API_KEY,
+  appKey: process.env.MESOMB_APP_KEY,
+  secretKey: process.env.MESOMB_SECRET_KEY,
+  baseURL: process.env.MESOMB_BASE_URL || 'https://mesomb.hachther.com/api/v1.1'
+};
+const mongoose = require('mongoose');
+
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/payment-saas');
+    console.log(`MongoDB connecté: ${conn.connection.host}`);
+  } catch (error) {
+    console.error('Erreur MongoDB:', error);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+

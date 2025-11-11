@@ -4,12 +4,11 @@
   "description": "Paiement MeSomb fullstack (backend + frontend)",
   "main": "backend/server.js",
   "scripts": {
-    "install": "npm install --prefix backend && npm install --prefix frontendgui",
-    "build": "npm run build --prefix frontendgui",
-    "start": "node backend/server.js"
+    "install": "npm install --prefix backend && npm install --prefix frontend",
+    "start": "npm start --prefix backend",
+    "build:frontend": "npm run build --prefix frontend"
   },
   "engines": {
     "node": "22.x"
-  },
-  "dependencies": {}
+  }
 }
